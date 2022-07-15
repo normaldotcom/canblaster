@@ -5,146 +5,148 @@ import datetime
 import struct
 import argparse
 
-# Settings
-bufferSize  = 1024
+
+class CANblaster(object):
+
+    def __init__(self, can_interface, bind_port, bind_ip):
+
+        # Connect to CAN interface
+        # Future: enable FD frames with CAN_RAW_FD_FRAMES
+        self.can_socket = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
+        self.can_socket.setblocking(1)
+        self.can_socket.settimeout(0.1)
+        self.can_socket.bind((args.interface,))
 
 
-# Parse arguments
-parser = argparse.ArgumentParser(description='Serve local socketcan traffic over UDP')
-parser.add_argument('interface', type=str,
-                    help='local CAN port, such as can0')
-parser.add_argument('-p', '--port', type=int,
-                    help='local UDP port to listen on',
-                    default=20002)
-parser.add_argument('-i', '--bind-ip', type=str,
-                    help='IP address to listen on',
-                    default='0.0.0.0')
-
-args = parser.parse_args()
-
-print(args)
+        # UDP socket for listening for heartbeats of clients
+        self.udpserver = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+        self.udpserver.setblocking(0)
+        self.udpserver.settimeout(0)
+        self.udpserver.bind((args.bind_ip, args.port))
 
 
-# Connect to CAN interface
-# Future: enable FD frames with CAN_RAW_FD_FRAMES
-sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
-sock.setblocking(1)
-sock.settimeout(0.1)
-sock.bind((args.interface,))
+        # Multicast socket, broadcast for discovery
+        self.multicast_group = ('239.255.43.21', 20000)
+        self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.multicast_socket.settimeout(0.2)
+        ttl = struct.pack('b', 1)
+        self.multicast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
 
 
-#bus = can.Bus(channel='vcan0', interface='socketcan')
+        print("canblaster: listening for clients")
 
 
 
-# UDP socket for listening for heartbeats of clients
-udpserver = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
-udpserver.setblocking(0) 
-udpserver.settimeout(0)
-udpserver.bind((args.bind_ip, args.port))
+
+    def timestamp(self):
+        now = datetime.datetime.now()
+        return now.strftime('%H:%M:%S:')
 
 
-# Multicast socket, broadcast for discovery
-multicast_group = ('239.255.43.21', 20000)
-multi_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-multi_sock.settimeout(0.2)
-ttl = struct.pack('b', 1)
-multi_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
+    # Send UDP multicast beacon message for discovery
+    def send_beacon(self):
+
+        message = '{"protocol":"CANblaster", "version":1}'
+        try:
+            # Send data to the multicast group
+            sent = self.multicast_socket.sendto(message.encode('utf8'), self.multicast_group)
+
+        except Exception as e:
+            print(type(e), e)
 
 
-print("canblaster: listening for clients")
+    # Start processing/broadcasting of CAN frames. Does not return.
+    def begin(self):
 
-# Storage for connected client IP / port tuples as key, heartbeat timestamp as value
-clients = {}
-status_time = 0
-beacon_time = 0
-rxcount = 0
-txcount = 0
-
-def timestamp():
-    now = datetime.datetime.now()
-    return now.strftime('%H:%M:%S:')
+        # Storage for connected client IP / port tuples as key, heartbeat timestamp as value
+        clients = {}
+        status_time = 0
+        beacon_time = 0
+        rxcount = 0
+        txcount = 0
 
 
-def send_beacon():
+        # Listen for incoming UDP packets
+        while(True):
 
-    message = '{"protocol":"CANblaster", "version":1}'
-    try:
-        # Send data to the multicast group
-        sent = multi_sock.sendto(message.encode('utf8'), multicast_group)
+            # Print status line
+            if time.time() - status_time > 5:
+                status_time = time.time()
+                print(self.timestamp() + " clients: " + str(len(clients)) + "  rx: " + str(rxcount) + "  tx: " + str(txcount))
 
-    except Exception as e:
-        print(type(e), e)
+            # Broadcast multicast discovery message
+            if time.time() - beacon_time > 0.5:
+                beacon_time = time.time()
+                self.send_beacon()
 
-# Listen for incoming UDP packets
-while(True):
+            # TODO: Receive either heartbeat message OR CAN message for TX. Differentiate between the two.
+            # Probably just no payload msg is heartbeat.
+            try:
+                bytesAddressPair = self.udpserver.recvfrom(1024)
+                address = bytesAddressPair[1]
 
-    # Print status line
-    if time.time() - status_time > 5:
-        status_time = time.time()
-        print(timestamp() + " clients: " + str(len(clients)) + "  rx: " + str(rxcount) + "  tx: " + str(txcount))
+                if not address in clients.keys():
 
-    # Broadcast multicast discovery message
-    if time.time() - beacon_time > 0.5:
-        beacon_time = time.time()
-        send_beacon()
+                    print(self.timestamp() + " client connected: " + str(address[0]) + ":" + str(address[1]))
 
-    # TODO: Receive either heartbeat message OR CAN message for TX. Differentiate between the two.
-    # Probably just no payload msg is heartbeat.
-    try:
-        bytesAddressPair = udpserver.recvfrom(bufferSize)
-        address = bytesAddressPair[1]
+                # Set last heartbeat time
+                clients[address] = time.time()
 
-        if not address in clients.keys():
+            except BlockingIOError as e:
+                # If no data ready to receive, just keep processing incoming CAN data
+                pass
 
-            print(timestamp() + " client connected: " + str(address[0]) + ":" + str(address[1]))
-
-        # Set last heartbeat time
-        clients[address] = time.time()
-
-    except BlockingIOError as e:
-        # If no data ready to receive, just keep processing incoming CAN data
-        pass
-    
-    except ConnectionResetError:
-        # Connection interrupted
-        pass
-        
+            except ConnectionResetError:
+                # Connection interrupted
+                pass
 
 
-    # TODO: Receive any CAN messages available
-    # Note: this will block for the configured time until data is received
+            # Receive any CAN messages available
+            try:
+                res = self.can_socket.recvfrom(1024)
+                outframe = res[0]
+            except TimeoutError as e:
+                continue
 
-    try:
-        res = sock.recvfrom(1024)
-        #print(''.join('{:02x}'.format(x) for x in res[0]))
-        outframe = res[0]
-    except TimeoutError as e:
-        continue
+            txcount += 1
 
-    txcount += 1
 
-    #message = bus.recv(0.1)
-    #if message is None:
-    #    continue
-    #else:
-    #    print(message)
+            # Transmit CAN data to each connected client.
+            # List of keys allows us to delete elements while iterating
+            for client in list(clients.keys()):
 
-    # Transmit CAN data to each connected client.
-    # List of keys allows us to delete elements while iterating
-    for client in list(clients.keys()):
-    
-        # Send data to client if heartbeat recieved within time
-        if time.time() - clients[client] < 1.0:
-            #outstr = "CAN Data " + str(time.time()) + "\r\n"
-            #udpserver.sendto(outstr.encode('utf8'), client)
-            udpserver.sendto(outframe, client)
-            
-        # Otherwise remove stale client
-        else:
-            print(timestamp() + " client disconnected: " + str(client[0]) + str(client[1]))
-            del clients[client]
-            
-            
-    # TODO: Remove once we are selecting on CAN RX
-    time.sleep(0.1)
+                # Send data to client if heartbeat recieved within time
+                if time.time() - clients[client] < 1.0:
+                    #outstr = "CAN Data " + str(time.time()) + "\r\n"
+                    #udpserver.sendto(outstr.encode('utf8'), client)
+                    self.udpserver.sendto(outframe, client)
+
+                # Otherwise remove stale client
+                else:
+                    print(timestamp() + " client disconnected: " + str(client[0]) + str(client[1]))
+                    del clients[client]
+
+
+            # TODO: Remove once we are selecting on CAN RX
+            time.sleep(0.1)
+
+
+
+
+if __name__ == "__main__":
+
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Serve local socketcan traffic over UDP')
+    parser.add_argument('interface', type=str,
+                        help='local CAN port, such as can0')
+    parser.add_argument('-p', '--port', type=int,
+                        help='local UDP port to listen on',
+                        default=20002)
+    parser.add_argument('-i', '--bind-ip', type=str,
+                        help='IP address to listen on',
+                        default='0.0.0.0')
+
+    args = parser.parse_args()
+
+    b = CANblaster(args.interface, args.port, args.bind_ip)
+    b.begin()
