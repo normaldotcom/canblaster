@@ -2,15 +2,27 @@ import socket
 import time
 import can
 import datetime
-
-# CAN settings
-canport = "vcan0"
-
+import struct
+import argparse
 
 # Settings
-bind_ip     = "127.0.0.1"
-bind_port   = 20002
 bufferSize  = 1024
+
+
+# Parse arguments
+parser = argparse.ArgumentParser(description='Serve local socketcan traffic over UDP')
+parser.add_argument('interface', type=str,
+                    help='local CAN port, such as can0')
+parser.add_argument('-p', '--port', type=int,
+                    help='local UDP port to listen on',
+                    default=20002)
+parser.add_argument('-i', '--bind-ip', type=str,
+                    help='IP address to listen on',
+                    default='0.0.0.0')
+
+args = parser.parse_args()
+
+print(args)
 
 
 # Connect to CAN interface
@@ -18,26 +30,34 @@ bufferSize  = 1024
 sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
 sock.setblocking(1)
 sock.settimeout(0.1)
-sock.bind((canport,))
+sock.bind((args.interface,))
 
 
 #bus = can.Bus(channel='vcan0', interface='socketcan')
 
 
 
-# Create a datagram socket
+# UDP socket for listening for heartbeats of clients
 udpserver = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
 udpserver.setblocking(0) 
 udpserver.settimeout(0)
+udpserver.bind((args.bind_ip, args.port))
 
-# Bind to address and ip
-udpserver.bind((bind_ip, bind_port))
+
+# Multicast socket, broadcast for discovery
+multicast_group = ('239.255.43.21', 20000)
+multi_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+multi_sock.settimeout(0.2)
+ttl = struct.pack('b', 1)
+multi_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
+
 
 print("canblaster: listening for clients")
 
 # Storage for connected client IP / port tuples as key, heartbeat timestamp as value
 clients = {}
 status_time = 0
+beacon_time = 0
 rxcount = 0
 txcount = 0
 
@@ -45,12 +65,29 @@ def timestamp():
     now = datetime.datetime.now()
     return now.strftime('%H:%M:%S:')
 
+
+def send_beacon():
+
+    message = '{"protocol":"CANblaster", "version":1}'
+    try:
+        # Send data to the multicast group
+        sent = multi_sock.sendto(message.encode('utf8'), multicast_group)
+
+    except Exception as e:
+        print(type(e), e)
+
 # Listen for incoming UDP packets
 while(True):
 
-    if(time.time() - status_time > 5):
-        print(timestamp() + " clients: " + str(len(clients)) + "  rx: " + str(rxcount) + "  tx: " + str(txcount))
+    # Print status line
+    if time.time() - status_time > 5:
         status_time = time.time()
+        print(timestamp() + " clients: " + str(len(clients)) + "  rx: " + str(rxcount) + "  tx: " + str(txcount))
+
+    # Broadcast multicast discovery message
+    if time.time() - beacon_time > 0.5:
+        beacon_time = time.time()
+        send_beacon()
 
     # TODO: Receive either heartbeat message OR CAN message for TX. Differentiate between the two.
     # Probably just no payload msg is heartbeat.
@@ -60,7 +97,7 @@ while(True):
 
         if not address in clients.keys():
 
-            print(timestamp() + " client connected: " + str(address[0]))
+            print(timestamp() + " client connected: " + str(address[0]) + ":" + str(address[1]))
 
         # Set last heartbeat time
         clients[address] = time.time()
