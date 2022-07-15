@@ -8,7 +8,7 @@ import argparse
 
 class CANblaster(object):
 
-    def __init__(self, can_interface, bind_port, bind_ip, ttl):
+    def __init__(self, can_interface, bind_port, bind_ip, bind_ttl):
 
         # Connect to CAN interface
         # Future: enable FD frames with CAN_RAW_FD_FRAMES
@@ -29,11 +29,11 @@ class CANblaster(object):
         self.multicast_group = ('239.255.43.21', 20000)
         self.multicast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.multicast_socket.settimeout(0.2)
-        ttl = struct.pack('b', ttl)
+        ttl = struct.pack('b', bind_ttl)
         self.multicast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
 
 
-        print("canblaster: listening for clients")
+        print("canblaster: listening for clients. Blasting on " + str(bind_ip) + ":" + str(bind_port) + " TTL=" + str(bind_ttl))
 
 
 
