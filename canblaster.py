@@ -8,7 +8,7 @@ import argparse
 
 class CANblaster(object):
 
-    def __init__(self, can_interface, bind_port, bind_ip, bind_ttl):
+    def __init__(self, can_interface, bind_port, bind_ip, bind_ttl, beaconrate, clienttimeout):
 
         # Connect to CAN interface
         # Future: enable FD frames with CAN_RAW_FD_FRAMES
@@ -32,6 +32,8 @@ class CANblaster(object):
         ttl = struct.pack('b', bind_ttl)
         self.multicast_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
 
+        self.beacon_rate = beaconrate
+        self.client_timeout = clienttimeout
 
         print("canblaster: listening for clients. Blasting on " + str(bind_ip) + ":" + str(bind_port) + " TTL=" + str(bind_ttl))
 
@@ -75,7 +77,7 @@ class CANblaster(object):
                 print(self.timestamp() + " clients: " + str(len(clients)) + "  rx: " + str(rxcount) + "  tx: " + str(txcount))
 
             # Broadcast multicast discovery message
-            if time.time() - beacon_time > 0.5:
+            if time.time() - beacon_time > self.beacon_rate:
                 beacon_time = time.time()
                 self.send_beacon()
 
@@ -116,14 +118,17 @@ class CANblaster(object):
             for client in list(clients.keys()):
 
                 # Send data to client if heartbeat recieved within time
-                if time.time() - clients[client] < 1.0:
+                if time.time() - clients[client] < self.client_timeout:
                     #outstr = "CAN Data " + str(time.time()) + "\r\n"
                     #udpserver.sendto(outstr.encode('utf8'), client)
-                    self.udpserver.sendto(outframe, client)
+                    try:
+                        self.udpserver.sendto(outframe, client)
+                    except BlockingIOError as e:
+                        print(self.timestamp() + "Dropping packet, network output buffer full")
 
                 # Otherwise remove stale client
                 else:
-                    print(timestamp() + " client disconnected: " + str(client[0]) + str(client[1]))
+                    print(self.timestamp() + " client disconnected: " + str(client[0]) + str(client[1]))
                     del clients[client]
 
 
@@ -148,8 +153,14 @@ if __name__ == "__main__":
     parser.add_argument('-t', '--ttl', type=int,
                         help='TTL for multicast discovery beacon',
                         default=1)
+    parser.add_argument('-b', '--beacon-rate', type=float,
+                        help='Period in seconds for beacon rate transmission',
+                        default=0.25)
+    parser.add_argument('-c', '--client-timeout', type=float,
+                        help='Timeout for connected clients in seconds',
+                        default=5)
 
     args = parser.parse_args()
 
-    b = CANblaster(args.can_interface, args.port, args.bind_ip, args.ttl)
+    b = CANblaster(args.can_interface, args.port, args.bind_ip, args.ttl, args.beacon_rate, args.client_timeout)
     b.begin()
