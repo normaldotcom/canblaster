@@ -1,6 +1,5 @@
 import socket
 import time
-import can
 import datetime
 import struct
 import argparse
